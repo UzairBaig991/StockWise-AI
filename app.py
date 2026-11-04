@@ -10,10 +10,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-apply_theme_css()
-render_sidebar_brand()
-initialize_database()
-
 pages = {
     "Workspace": [
         st.Page(
@@ -64,4 +60,34 @@ pages = {
     ],
 }
 
-st.navigation(pages, position="sidebar").run()
+current_page = st.navigation(pages, position="hidden")
+apply_theme_css()
+initialize_database()
+render_sidebar_brand()
+
+with st.sidebar:
+    st.markdown('<div class="sw-nav-section">Workspace</div>', unsafe_allow_html=True)
+    st.page_link("pages/0_Dashboard.py", label="Dashboard", icon=":material/dashboard:")
+    st.page_link(
+        "pages/2_Products_Inventory.py",
+        label="Products & Inventory",
+        icon=":material/inventory_2:",
+    )
+    st.page_link("pages/1_Data_Import.py", label="Data Import", icon=":material/upload_file:")
+    st.page_link(
+        "pages/5_Reorder_Recommendations.py",
+        label="Reorder Recommendations",
+        icon=":material/auto_awesome:",
+    )
+    st.markdown('<div class="sw-nav-section">Insights</div>', unsafe_allow_html=True)
+    st.page_link("pages/3_Sales_Analytics.py", label="Sales Analytics", icon=":material/query_stats:")
+    st.page_link("pages/4_Demand_Forecast.py", label="Demand Forecast", icon=":material/trending_up:")
+    st.page_link(
+        "pages/6_Model_Performance.py",
+        label="Model Performance",
+        icon=":material/monitoring:",
+    )
+    st.markdown('<div class="sw-nav-section">Support</div>', unsafe_allow_html=True)
+    st.page_link("pages/7_About_Help.py", label="About & Help", icon=":material/help_outline:")
+
+current_page.run()

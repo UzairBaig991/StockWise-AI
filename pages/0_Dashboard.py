@@ -8,7 +8,7 @@ from src.database import fetch_inventory_rows, fetch_products, get_connection
 from src.inventory_logic import compute_reorder_metrics
 from src.ui_components import metric_card, page_title
 
-page_title("Dashboard", "Real-time inventory intelligence for your business.")
+page_title("Dashboard", "A clear view of your inventory, demand, and next actions.")
 
 header_left, header_right = st.columns([1, 0.25], vertical_alignment="center")
 with header_left:
@@ -51,13 +51,82 @@ activity = pd.DataFrame(
 if not sales.empty:
     sales["invoice_date"] = pd.to_datetime(sales["invoice_date"])
     data_end = sales["invoice_date"].max().normalize()
-    window_start = data_end - pd.Timedelta(days=29)
-    recent_sales = sales[sales["invoice_date"] >= window_start]
+    data_start = sales["invoice_date"].min().normalize()
     product_daily_demand = sales.groupby("sku")["units_sold"].mean().to_dict()
 else:
     data_end = None
-    recent_sales = sales
+    data_start = None
     product_daily_demand = {}
+
+window_column, product_column = st.columns(2)
+with window_column:
+    selected_window = st.selectbox(
+        "Sales period",
+        ["Last 7 days", "Last 30 days", "Last 90 days", "All available data"],
+        index=1,
+        key="dashboard_sales_window",
+    )
+with product_column:
+    product_options = ["All products", *sorted(sales["sku"].astype(str).unique())] if not sales.empty else ["All products"]
+    selected_product = st.selectbox(
+        "Product trend",
+        product_options,
+        key="dashboard_product_filter",
+        disabled=sales.empty,
+    )
+
+period_days = {
+    "Last 7 days": 7,
+    "Last 30 days": 30,
+    "Last 90 days": 90,
+}.get(selected_window)
+comparison_sales = (
+    sales[sales["sku"] == selected_product]
+    if selected_product != "All products"
+    else sales
+)
+if data_end is not None and data_start is not None:
+    current_period_start = (
+        max(data_start, data_end - pd.Timedelta(days=period_days - 1))
+        if period_days is not None
+        else data_start
+    )
+    current_sales = sales[sales["invoice_date"] >= current_period_start]
+    actual_period_days = max(1, (data_end - current_period_start).days + 1)
+    if period_days is not None:
+        previous_period_end = current_period_start - pd.Timedelta(days=1)
+        previous_period_start = previous_period_end - pd.Timedelta(days=period_days - 1)
+        if not comparison_sales.empty and comparison_sales["invoice_date"].min() <= previous_period_start:
+            previous_sales = comparison_sales[
+                (comparison_sales["invoice_date"] >= previous_period_start)
+                & (comparison_sales["invoice_date"] <= previous_period_end)
+            ]
+        else:
+            previous_sales = comparison_sales.iloc[0:0]
+    else:
+        previous_sales = sales.iloc[0:0]
+else:
+    current_period_start = None
+    current_sales = sales
+    previous_sales = sales.iloc[0:0]
+    actual_period_days = 1
+
+if selected_product != "All products":
+    current_sales = current_sales[current_sales["sku"] == selected_product]
+    previous_sales = previous_sales[previous_sales["sku"] == selected_product]
+
+current_units = float(current_sales["units_sold"].sum()) if not current_sales.empty else 0.0
+previous_units = float(previous_sales["units_sold"].sum()) if not previous_sales.empty else 0.0
+if not previous_sales.empty and previous_units > 0:
+    sales_delta = f"{(current_units - previous_units) / previous_units:+.1%} vs previous period"
+elif period_days is None:
+    sales_delta = "All available sales history"
+elif period_days is not None and not comparison_sales.empty and comparison_sales["invoice_date"].min() > previous_period_start:
+    sales_delta = "Not enough history to compare"
+elif current_units > 0:
+    sales_delta = f"+{current_units:,.0f} units vs previous period"
+else:
+    sales_delta = "No sales in selected period"
 
 on_hand_units = sum(float(item.get("current_stock") or 0) for item in inventory_rows)
 review_items: list[dict[str, object]] = []
@@ -74,9 +143,12 @@ if not sales.empty:
                 {
                     "sku": item["sku"],
                     "name": item.get("name") or item["sku"],
-                    "recommended_order_qty": metrics["recommended_order_qty"],
+                    "current_stock": float(item.get("current_stock") or 0),
+                    "reorder_point": float(metrics["reorder_point"]),
+                    "recommended_order_qty": float(metrics["recommended_order_qty"]),
                 }
             )
+review_items.sort(key=lambda item: float(item["recommended_order_qty"]), reverse=True)
 
 if not sales.empty and inventory_rows:
     health_score: int | None = round(
@@ -89,11 +161,14 @@ stock_panel, metrics_panel = st.columns([1.08, 1.12], gap="medium")
 with stock_panel:
     score = health_score or 0
     score_label = f"{health_score}%" if health_score is not None else "—"
-    health_caption = (
-        f"{len(inventory_rows) - len(review_items)} of {len(inventory_rows)} stocked products are above their reorder point."
-        if health_score is not None
-        else "Import sales and configure stock to calculate inventory health."
-    )
+    if health_score is not None:
+        health_caption = (
+            f"{len(inventory_rows) - len(review_items)} of {len(inventory_rows)} stocked products are above their reorder point."
+        )
+    elif not sales.empty:
+        health_caption = "Add current stock levels to calculate inventory health."
+    else:
+        health_caption = "Import sales and configure stock to calculate inventory health."
     st.markdown(
         f"""
         <div class="sw-panel">
@@ -103,7 +178,7 @@ with stock_panel:
                 <div class="sw-health-ring" style="--health-score:{score}%">
                     <div class="sw-health-ring-inner">
                         <div class="sw-health-score">{score_label}</div>
-                        <div class="sw-health-percent">HEALTHY</div>
+                        <div class="sw-health-percent">HEALTH</div>
                     </div>
                 </div>
                 <div>
@@ -123,15 +198,22 @@ with metrics_panel:
     with metric_top[0]:
         metric_card("Total products", f"{len(products):,}", "in your catalog")
     with metric_top[1]:
-        metric_card("Units sold", f"{recent_sales['units_sold'].sum():,.0f}", "latest 30 data days")
+        metric_card("Units sold", f"{current_units:,.0f}", sales_delta)
     metric_bottom = st.columns(2, gap="small")
     with metric_bottom[0]:
-        metric_card("Units on hand", f"{on_hand_units:,.0f}", "configured inventory")
+        daily_average = current_units / actual_period_days
+        metric_card("Avg. daily demand", f"{daily_average:,.1f}", "units per calendar day")
     with metric_bottom[1]:
         metric_card(
             "Reorder alerts",
-            f"{len(review_items):,}" if not sales.empty else "—",
-            "products at or below reorder point" if not sales.empty else "import sales to calculate",
+            f"{len(review_items):,}" if not sales.empty and inventory_rows else "—",
+            (
+                "products at or below reorder point"
+                if not sales.empty and inventory_rows
+                else "configure stock to calculate"
+                if not inventory_rows
+                else "import sales to calculate"
+            ),
         )
 
 st.write("")
@@ -157,7 +239,7 @@ if review_items:
             icon=":material/arrow_forward:",
             use_container_width=True,
         )
-elif not sales.empty:
+elif not sales.empty and inventory_rows:
     st.markdown(
         """
         <div class="sw-alert" style="border-color:rgba(139,226,63,.25);background:rgba(139,226,63,.06)">
@@ -170,7 +252,7 @@ elif not sales.empty:
         """,
         unsafe_allow_html=True,
     )
-else:
+elif sales.empty:
     st.markdown(
         """
         <div class="sw-alert">
@@ -189,19 +271,38 @@ else:
         icon=":material/upload_file:",
         use_container_width=False,
     )
+else:
+    st.markdown(
+        """
+        <div class="sw-alert">
+            <div class="sw-alert-icon">+</div>
+            <div>
+                <div class="sw-alert-title">Sales data is connected</div>
+                <div class="sw-alert-caption">Add current stock and safety-stock levels to calculate reorder insights.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.page_link(
+        "pages/2_Products_Inventory.py",
+        label="Configure inventory",
+        icon=":material/inventory_2:",
+        use_container_width=False,
+    )
 
 st.write("")
 chart_panel, activity_panel = st.columns([1.25, 0.75], gap="medium")
 with chart_panel:
     with st.container(border=True):
         st.markdown(
-            '<div class="sw-panel-title">Daily demand</div>'
-            '<div class="sw-panel-caption">Units sold across the latest 30 data days</div>',
+            '<div class="sw-panel-title">Demand trend</div>'
+            f'<div class="sw-panel-caption">{selected_window} · {selected_product}</div>',
             unsafe_allow_html=True,
         )
-        if not recent_sales.empty:
+        if not current_sales.empty:
             trend = (
-                recent_sales.groupby("invoice_date", as_index=False)["units_sold"]
+                current_sales.groupby("invoice_date", as_index=False)["units_sold"]
                 .sum()
                 .sort_values("invoice_date")
             )
@@ -224,12 +325,12 @@ with chart_panel:
                 xaxis=dict(showgrid=False),
                 yaxis=dict(gridcolor="#2b2b32", rangemode="tozero"),
                 showlegend=False,
-                height=250,
+                height=270,
             )
             st.plotly_chart(chart, use_container_width=True)
         else:
             st.markdown(
-                '<div class="sw-empty">Your sales trend will appear here after you import data.</div>',
+                '<div class="sw-empty">No sales match this view yet. Try another period or import more sales data.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -261,5 +362,38 @@ with activity_panel:
                 unsafe_allow_html=True,
             )
 
+if review_items:
+    st.markdown('<div class="sw-section-heading">Replenishment priorities</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sw-section-caption">Products ordered by suggested replenishment quantity.</div>',
+        unsafe_allow_html=True,
+    )
+    priority_left, priority_right = st.columns([1, 0.25], vertical_alignment="center")
+    with priority_left:
+        priority_frame = pd.DataFrame(review_items).rename(
+            columns={
+                "sku": "SKU",
+                "name": "Product",
+                "current_stock": "On hand",
+                "reorder_point": "Reorder point",
+                "recommended_order_qty": "Suggested order",
+            }
+        )
+        st.dataframe(
+            priority_frame[["SKU", "Product", "On hand", "Reorder point", "Suggested order"]].head(5),
+            hide_index=True,
+            use_container_width=True,
+        )
+    with priority_right:
+        st.page_link(
+            "pages/5_Reorder_Recommendations.py",
+            label="View all recommendations",
+            icon=":material/arrow_forward:",
+            use_container_width=True,
+        )
+
 if data_end is not None:
-    st.caption(f"Showing activity through {data_end.strftime('%b %d, %Y')}.")
+    st.caption(
+        f"Sales period: {current_period_start.strftime('%b %d, %Y')} – "
+        f"{data_end.strftime('%b %d, %Y')} · Inventory last refreshed when this page loaded."
+    )
